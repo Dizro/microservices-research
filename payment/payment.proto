@@ -1,0 +1,14 @@
+syntax = "proto3";
+package payment;
+
+service PaymentService {
+  rpc CheckPaymentStatus (PaymentRequest) returns (PaymentResponse);
+}
+
+message PaymentRequest {
+  string appointmentId = 1;
+}
+
+message PaymentResponse {
+  string status = 1;
+}

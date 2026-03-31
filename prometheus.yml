@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'clinic_services'
+    static_configs:
+      - targets: ['appointment:3003', 'payment:3004']

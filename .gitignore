@@ -1,0 +1,35 @@
+# Зависимости
+node_modules/
+npm-debug.log
+package-lock.json
+
+# Переменные окружения (содержат пароли)
+.env
+.env.local
+.env.production
+notification/.env
+*/.env
+
+# Логи
+*.log
+logs/
+debug_log.txt
+result.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.sw?
+
+# Docker
+docker-compose.override.yml
+
+# Python утилиты
+maind.py
+__pycache__/
+*.pyc

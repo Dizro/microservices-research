@@ -1,0 +1,265 @@
+version: '3.8'
+
+services:
+  consul:
+    image: hashicorp/consul:latest
+    ports: ["8500:8500"]
+    command: agent -dev -client=0.0.0.0 -ui
+    networks:
+      - clinic_net
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports: ["5672:5672", "15672:15672"]
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    networks:
+      - clinic_net
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    networks:
+      - clinic_net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    depends_on: [zookeeper]
+    ports: ["9092:9092"]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - clinic_net
+
+  postgres:
+    image: postgres:15-alpine
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: main_db
+    volumes:
+      - ./postgres-init:/docker-entrypoint-initdb.d
+    networks:
+      - clinic_net
+
+  mongo:
+    image: mongo:latest
+    ports: ["27017:27017"]
+    networks:
+      - clinic_net
+
+  # =================================================================
+  # ВНЕШНИЕ СИСТЕМЫ (запускаются с профилем "external")
+  # =================================================================
+  
+  payment-provider:
+    build: ./payment-provider
+    ports: ["3007:3007"]
+    profiles: ["external"]
+    networks:
+      - clinic_net
+      - external_net
+    labels:
+      com.medical.system: "external"
+      com.medical.description: "Внешний платежный провайдер (mock)"
+
+  smtp-server:
+    image: mailhog/mailhog:latest
+    ports: 
+      - "1025:1025"  # SMTP порт
+      - "8025:8025"  # Web UI для просмотра писем
+    profiles: ["external"]
+    networks:
+      - clinic_net
+      - external_net
+    labels:
+      com.medical.system: "external"
+      com.medical.description: "Внешний SMTP сервер (MailHog)"
+
+  # =================================================================
+  # МИКРОСЕРВИСЫ СИСТЕМЫ
+  # =================================================================
+
+  auth:
+    build: ./auth
+    ports: ["3001:3001"]
+    depends_on: [consul, postgres]
+    environment:
+      DB_HOST: postgres
+    networks:
+      - clinic_net
+
+  doctors:
+    build: ./doctors
+    ports: ["3002:3002"]
+    depends_on: [consul, mongo]
+    environment:
+      MONGO_URI: mongodb://mongo:27017/doctors_db
+    networks:
+      - clinic_net
+
+  appointment:
+    build: ./appointment
+    ports: ["3003:3003"]
+    depends_on: 
+      - consul
+      - rabbitmq
+      - kafka
+      - postgres
+      - payment
+    environment:
+      DB_HOST: postgres
+      RABBIT_URI: amqp://guest:guest@rabbitmq:5672
+      KAFKA_BROKER: kafka:29092
+    networks:
+      - clinic_net
+
+  payment:
+    build: ./payment
+    ports: ["3004:3004", "50051:50051"]
+    depends_on: 
+      - consul
+      - rabbitmq
+      - postgres
+    environment:
+      DB_HOST: postgres
+      RABBIT_URI: amqp://guest:guest@rabbitmq:5672
+      # Внешний провайдер - проверяем наличие через host.docker.internal
+      PAYMENT_PROVIDER_URL: ${PAYMENT_PROVIDER_URL:-http://payment-provider:3007}
+    networks:
+      - clinic_net
+    extra_hosts:
+      - "payment-provider.external:host-gateway"
+
+  notification:
+    build: ./notification
+    ports: ["3005:3005"]
+    depends_on: 
+      - rabbitmq
+      - postgres
+    environment:
+      RABBIT_URI: amqp://guest:guest@rabbitmq:5672
+      DB_HOST: postgres
+      # SMTP конфигурация для внешнего сервера
+      SMTP_HOST: ${SMTP_HOST:-smtp-server}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USER: ${SMTP_USER:-test@example.com}
+      SMTP_PASS: ${SMTP_PASS:-test}
+    networks:
+      - clinic_net
+    extra_hosts:
+      - "smtp-server.external:host-gateway"
+
+  analytics:
+    build: ./analytics
+    ports: ["3006:3006"]
+    depends_on: [kafka, postgres]
+    environment:
+      KAFKA_BROKER: kafka:29092
+      DB_HOST: postgres
+    networks:
+      - clinic_net
+
+  graphql-gateway:
+    build: ./graphql-gateway
+    ports: ["4000:4000"]
+    depends_on: [doctors, appointment]
+    networks:
+      - clinic_net
+
+  gateway:
+    build: ./gateway
+    ports: ["3000:3000"]
+    depends_on: [auth, doctors, appointment, payment, graphql-gateway]
+    networks:
+      - clinic_net
+
+  # =================================================================
+  # МОНИТОРИНГ И OBSERVABILITY
+  # =================================================================
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports: ["9090:9090"]
+    networks:
+      - clinic_net
+
+  loki:
+    image: grafana/loki:2.9.0
+    ports: ["3100:3100"]
+    user: "0"
+    volumes:
+      - ./loki-config.yaml:/etc/loki/local-config.yaml
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - clinic_net
+
+  promtail:
+    image: grafana/promtail:2.9.0
+    user: "0"
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./promtail-config.yaml:/etc/promtail/config.yml
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - clinic_net
+
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3010:3000"]
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on: [prometheus, loki, jaeger]
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - clinic_net
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "14268:14268"
+    networks:
+      - clinic_net
+
+  # =================================================================
+  # НАГРУЗОЧНОЕ ТЕСТИРОВАНИЕ
+  # =================================================================
+
+  k6:
+    image: grafana/k6:latest
+    volumes:
+      - ./loadtest.js:/loadtest.js
+    command: run /loadtest.js
+    depends_on: [gateway]
+    profiles: ["test"]
+    networks:
+      - clinic_net
+
+networks:
+  clinic_net:
+    driver: bridge
+    labels:
+      com.medical.network: "internal"
+  
+  external_net:
+    driver: bridge
+    labels:
+      com.medical.network: "external"
+      com.medical.description: "Сеть для внешних систем"
+
+volumes:
+  grafana_data:
